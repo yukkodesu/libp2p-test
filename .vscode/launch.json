@@ -1,0 +1,33 @@
+{
+    // 使用 IntelliSense 了解相关属性。 
+    // 悬停以查看现有属性的描述。
+    // 欲了解更多信息，请访问: https://go.microsoft.com/fwlink/?linkid=830387
+    "version": "0.2.0",
+    "configurations": [
+        {
+            "name": "Debug executable 'rust-libp2p-tutorial'",
+            "type": "lldb",
+            "request": "launch",
+            "cargo": {
+                "args": [
+                    "run",
+                    "--bin=rust-libp2p-tutorial"
+                ]
+            },
+            "args": [
+                "/ip4/192.168.31.200/udp/10086/quic-v1"
+            ]
+        },
+        {
+            "name": "Debug unit tests in executable 'rust-libp2p-tutorial'",
+            "type": "lldb",
+            "request": "launch",
+            "cargo": {
+                "args": [
+                    "test",
+                    "--bin=rust-libp2p-tutorial"
+                ]
+            }
+        }
+    ]
+}
