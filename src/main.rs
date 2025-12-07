@@ -60,9 +60,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     SwarmEvent::NewListenAddr { address, .. } => {
                         println!("Listening on {address}");
                     }
-                    SwarmEvent::Behaviour(request_response::Event::Message { message:request_response::Message::Request { request, .. }, ..}) => {
+                    SwarmEvent::Behaviour(request_response::Event::Message { message:request_response::Message::Request { request, channel, request_id }, ..}) => {
                         buf_writer.write_all(&request.content[..request.len]).await?;
                         buf_writer.flush().await?;
+                        let _ = swarm.behaviour_mut().send_response(channel, StringResponse { ok: true });
                     }
                     SwarmEvent::Behaviour(event) => {
                         println!("event: {event:?}");
