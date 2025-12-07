@@ -6,7 +6,7 @@ use libp2p::{
     request_response::{self, ProtocolSupport, cbor},
     swarm::SwarmEvent,
 };
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt};
 use tracing_subscriber::EnvFilter;
 
 #[derive(Debug, serde::Serialize, serde::Deserialize)]
@@ -52,7 +52,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     let mut buf_reader = tokio::io::BufReader::new(tokio::io::stdin());
     let mut buf_writer = tokio::io::BufWriter::new(tokio::io::stdout());
-    let mut byte = [0u8; 4096];
+    let mut line = String::new();
     loop {
         tokio::select! {
             event = swarm.select_next_some() => {
@@ -61,7 +61,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         println!("Listening on {address}");
                     }
                     SwarmEvent::Behaviour(request_response::Event::Message { message:request_response::Message::Request { request, .. }, ..}) => {
-                        let _ = buf_writer.write(&request.content[..request.len]).await?;
+                        buf_writer.write_all(&request.content[..request.len]).await?;
+                        buf_writer.flush().await?;
                     }
                     SwarmEvent::Behaviour(event) => {
                         println!("event: {event:?}");
@@ -74,20 +75,21 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 println!("Ctrl-C received, shutting down.");
                 break;
             }
-            len = buf_reader.read(&mut byte) => {
-                let n = len?;
+            result = buf_reader.read_line(&mut line) => {
+                let n = result?;
                 if n == 0 {
                     continue;
                 }
-                let input = &byte[..n];
+                let input = line.as_bytes();
                 // send to connected peers
                 let peers: Vec<_> = swarm.connected_peers().copied().collect();
                 for peer_id in peers {
                     swarm.behaviour_mut().send_request(&peer_id, StringRequest {
-                        len: n,
+                        len: input.len(),
                         content: input.to_vec(),
                     });
                 }
+                line.clear();
             }
         }
     }
