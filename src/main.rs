@@ -27,7 +27,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .try_init();
 
     let behaviour = cbor::Behaviour::<StringRequest, StringResponse>::new(
-        [(StreamProtocol::new("/string/1.0.0"), ProtocolSupport::Full)],
+        [(
+            StreamProtocol::new("/string/1.0.0"),
+            ProtocolSupport::Outbound,
+        )],
         request_response::Config::default(),
     );
     let mut swarm = SwarmBuilder::with_new_identity()
@@ -37,18 +40,21 @@ async fn main() -> Result<(), Box<dyn Error>> {
         .with_swarm_config(|cfg| cfg.with_idle_connection_timeout(Duration::from_secs(u64::MAX)))
         .build();
 
-    swarm.listen_on("/ip4/0.0.0.0/udp/10086/quic-v1".parse()?)?;
-
-    for argument in std::env::args() {
-        println!("{argument}");
+    // parse listen address from command line or use default
+    // --port <port> --peer <peer multiaddr>
+    let args = std::env::args().collect::<Vec<String>>();
+    if args.len() < 5 {
+        println!("Usage: {} --port <port> --peer <peer multiaddr>", args[0]);
+        return Err("Not enough arguments".into());
     }
+    let port = args[2].parse::<u16>()?;
+    let peer_addr = &args[4];
+    let listen_addr = format!("/ip4/0.0.0.0/udp/{}/quic-v1", port);
+    swarm.listen_on(listen_addr.parse()?)?;
 
-    if let Some(addr) = std::env::args().nth(1) {
-        println!("Input address: {}", addr);
-        let remote: Multiaddr = addr.parse()?;
-        swarm.dial(remote)?;
-        println!("Dialed {}", addr);
-    }
+    let remote: Multiaddr = peer_addr.parse()?;
+    swarm.dial(remote)?;
+    println!("Dialed {}", peer_addr);
 
     let mut buf_reader = tokio::io::BufReader::new(tokio::io::stdin());
     let mut buf_writer = tokio::io::BufWriter::new(tokio::io::stdout());
@@ -63,7 +69,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     SwarmEvent::Behaviour(request_response::Event::Message { message:request_response::Message::Request { request, channel, request_id }, ..}) => {
                         buf_writer.write_all(&request.content[..request.len]).await?;
                         buf_writer.flush().await?;
-                        let _ = swarm.behaviour_mut().send_response(channel, StringResponse { ok: true });
+                        // let _ = swarm.behaviour_mut().send_response(channel, StringResponse { ok: true });
                     }
                     SwarmEvent::Behaviour(event) => {
                         println!("event: {event:?}");
