@@ -145,23 +145,21 @@ async fn main() -> Result<(), Box<dyn Error>> {
             }
             // poll every existing stream for incoming messages
             // iterate over peer_manager streams
-            res = async {
+            _ = async {
                 let mut buf: Vec<u8> = Vec::with_capacity(4096);
                 for (peer_id, stream) in peer_manager.streams.iter_mut() {
                     match stream.read(&mut buf).await {
                         Ok(n) => {
-                            let msg = String::from_utf8_lossy(&buf[..n]);
-                            println!("⬅️  来自节点 {} 的消息: {}", peer_id, msg);
+                            let _ = buf_writer.write_all(&buf[..n]).await;
                         }
                         Err(e) => {
-                            println!("⚠️  读取来自节点 {} 的消息时出错: {}", peer_id, e);
+                            eprintln!("读取节点 {} 的流时出错: {}", peer_id, e);
+                            continue;
                         }
                     }
 
                 }
-                buf
             } => {
-                buf_writer.write_all(&res).await?;
                 buf_writer.flush().await?;
             }
         }
