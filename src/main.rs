@@ -93,17 +93,22 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         line.clear();
                         continue;
                     }
-                    "count" => {
-                        println!("📊 当前发现的节点数量: {}", peer_manager.peer_count());
-                        line.clear();
-                        continue;
-                    }
-                    "help" => {
-                        println!("\n可用命令:");
-                        println!("  list/peers - 列出所有已发现的节点");
-                        println!("  count      - 显示节点数量");
-                        println!("  help       - 显示此帮助信息");
-                        println!("  <其他输入> - 发送消息给所有连接的节点\n");
+                    "connected" => {
+                        let peers: Vec<_> = swarm.connected_peers().copied().collect();
+                        if peers.is_empty() {
+                            println!("📭 当前没有连接的节点");
+                        } else {
+                            println!("\n📋 当前连接的节点列表 (共 {} 个):", peers.len());
+                            for peer_id in peers {
+                                println!("🔹 节点ID: {}", peer_id);
+                                if let Some(addrs) = peer_manager.get_peer_addrs(&peer_id) {
+                                    for addr in addrs {
+                                        println!("   地址: {}", addr);
+                                    }
+                                }
+                                println!();
+                            }
+                        }
                         line.clear();
                         continue;
                     }
