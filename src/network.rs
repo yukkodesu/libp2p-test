@@ -1,4 +1,4 @@
-use std::{error::Error, time::Duration};
+use std::error::Error;
 
 use libp2p::{Swarm, SwarmBuilder, identity, kad::{self, store::MemoryStore}};
 use crate::behaviour::StrandsBehaviour;
@@ -28,7 +28,6 @@ pub fn create_swarm(keypair: identity::Keypair) -> Result<Swarm<StrandsBehaviour
         .with_tokio()
         .with_quic()
         .with_behaviour(|_| behaviour)?
-        .with_swarm_config(|cfg| cfg.with_idle_connection_timeout(Duration::from_secs(u64::MAX)))
         .build();
 
     Ok(swarm)

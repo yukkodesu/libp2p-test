@@ -1,19 +1,27 @@
 use std::collections::HashMap;
+use std::sync::Arc;
+use tokio::sync::RwLock;
 
 use libp2p::Stream;
 
 
 pub struct PeerManager {
-    pub peers: HashMap<libp2p::PeerId, Vec<libp2p::Multiaddr>>,
-    pub streams: HashMap<libp2p::PeerId, Stream>,
+    peers: HashMap<libp2p::PeerId, Vec<libp2p::Multiaddr>>,
+    streams: HashMap<libp2p::PeerId, Stream>,
 }
 
+pub type SharedPeerManager = Arc<RwLock<PeerManager>>;
+
 impl PeerManager {
-    pub fn new () -> Self {
+    pub fn new() -> Self {
         Self {
             peers: HashMap::new(),
             streams: HashMap::new(),
         }
+    }
+
+    pub fn new_shared() -> SharedPeerManager {
+        Arc::new(RwLock::new(Self::new()))
     }
 
     /// 添加或更新节点地址
@@ -30,28 +38,10 @@ impl PeerManager {
             println!("🗑️  移除节点: {}", peer_id);
         }
     }
-
-    /// 获取节点的所有地址
     pub fn get_peer_addrs(&self, peer_id: &libp2p::PeerId) -> Option<&Vec<libp2p::Multiaddr>> {
         self.peers.get(peer_id)
     }
 
-    /// 检查节点是否存在
-    pub fn has_peer(&self, peer_id: &libp2p::PeerId) -> bool {
-        self.peers.contains_key(peer_id)
-    }
-
-    /// 获取所有已发现的节点
-    pub fn get_all_peers(&self) -> Vec<&libp2p::PeerId> {
-        self.peers.keys().collect()
-    }
-
-    /// 获取节点数量
-    pub fn peer_count(&self) -> usize {
-        self.peers.len()
-    }
-
-    /// 列出所有节点及其地址
     pub fn list_peers(&self) {
         if self.peers.is_empty() {
             println!("📭 暂无发现的节点");
@@ -88,5 +78,13 @@ impl PeerManager {
             e.insert(stream);
         }
         self.streams.get_mut(&peer_id).unwrap()
+    }
+
+    pub fn stream_iter(&mut self) -> impl Iterator<Item = (&libp2p::PeerId, &mut Stream)> {
+        self.streams.iter_mut()
+    }
+
+    pub fn stream_count(&self) -> usize {
+        self.streams.len()
     }
 }
