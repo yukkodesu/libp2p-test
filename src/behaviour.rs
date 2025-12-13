@@ -50,7 +50,7 @@ pub async fn handle_swarm_event(event: SwarmEvent<StrandsBehaviourEvent>, peer_m
                     peer_manager.remove_peer(&peer_id).await;
                 }
             }
-        },
+        }
         // handle disconnect
         SwarmEvent::ConnectionClosed { peer_id, .. } => {
             println!("❌ 与节点 {} 的连接已关闭", peer_id);

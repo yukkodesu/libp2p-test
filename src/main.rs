@@ -35,10 +35,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     let mut buf_reader = tokio::io::BufReader::new(tokio::io::stdin());
     let mut buf_writer = tokio::io::BufWriter::new(tokio::io::stdout());
-    let control = swarm.behaviour().stream.new_control();
-
-    // channel for sending data to connected peers
-    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Bytes>();
+    let mut control = swarm.behaviour().stream.new_control();
 
     let peer_manager_clone = peer_manager.clone();
     let mut control_clone = control.clone();
@@ -55,22 +52,6 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     let data = data.expect("Task panicked");
                     if let Some(buf) = data {
                         buf_writer.write_all(&buf).await.unwrap();
-                    }
-                }
-                Some(data) = rx.recv() => {
-                    for peer_id in peer_manager_clone.connected_peer().await {
-                        let stream = peer_manager_clone.get_or_insert_stream(peer_id, || async {
-                            control_clone
-                                .open_stream(peer_id, StreamProtocol::new("/stream/1.0.0"))
-                                .await
-                                .unwrap()
-                        }).await;
-                        let mut stream = stream.lock().await;
-                        if let Err(e) = stream.write_all(&data).await {
-                            eprintln!("❌ 发送消息到 {} 失败: {}", peer_id, e);
-                            continue;
-                        }
-                        println!("➡️  发送消息到 {}: {}", peer_id, String::from_utf8_lossy(&data));
                     }
                 }
                 Some((peer_id, stream)) = incoming.next() => {
@@ -170,8 +151,19 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 // 发送消息给连接的节点
                 // let input = line.as_bytes();
                 // send to connected peers
-                let bytes = Bytes::from(input.into_bytes());
-                tx.send(bytes).unwrap();
+                for peer_id in swarm.connected_peers() {
+                    let stream = peer_manager.get_or_insert_stream(*peer_id, || async {
+                        control
+                            .open_stream(*peer_id, StreamProtocol::new("/stream/1.0.0"))
+                            .await
+                            .unwrap()
+                    }).await;
+                    let mut stream = stream.lock().await;
+                    if let Err(e) = stream.write_all(input.as_bytes()).await {
+                        eprintln!("❌ 发送消息到 {} 失败: {}", peer_id, e);
+                        continue;
+                    }
+                }
                 line.clear();
             }
         }
