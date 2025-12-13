@@ -3,12 +3,18 @@ mod network;
 mod peer_manager;
 
 use core::panic;
-use std::{error::Error, sync::{Arc, RwLock}};
+use std::{
+    error::Error,
+    sync::{Arc, RwLock},
+};
 
 use bytes::Bytes;
 use futures::{AsyncReadExt, AsyncWriteExt, StreamExt, stream::FuturesUnordered};
 use libp2p::{Multiaddr, StreamProtocol, identity};
-use tokio::{io::{AsyncBufReadExt, AsyncWriteExt as TokioAsyncWriteExt}, sync::Mutex};
+use tokio::{
+    io::{AsyncBufReadExt, AsyncWriteExt as TokioAsyncWriteExt},
+    sync::Mutex,
+};
 use tracing_subscriber::EnvFilter;
 
 use crate::{
@@ -53,7 +59,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 // handle all recv_tasks futureUnordered in peer_manager
                 Some(_) = tasks.next() => {}
                 Some(data) = stdin_rx.recv() => {
-                    let txs = stdin_txs.lock().await;
+                    let txs = stdin_txs.try_lock().unwrap();
                     for tx in txs.iter() {
                         if let Err(e) = tx.send(data.clone()).await {
                             println!("❌ 发送数据到节点失败: {}", e);
@@ -67,21 +73,23 @@ async fn main() -> Result<(), Box<dyn Error>> {
                     tasks.push(tokio::spawn(async move {
                         let mut stream = stream;
                         let read_buf = &mut [0u8; 1024];
-                        tokio::select! {
-                            Some(data) = stdin_rx.recv() => {
-                                stream.write_all(&data).await.unwrap();
-                            }
-                            result = stream.read(read_buf) => {
-                                match result {
-                                    Ok(0) => {
-                                        println!("🔌 连接关闭: {}", peer_id);
-                                    }
-                                    Ok(n) => {
-                                        let received_data = &read_buf[..n];
-                                        stdout_tx.send(Bytes::from(received_data.to_vec())).await.unwrap();
-                                    }
-                                    Err(e) => {
-                                        println!("❌ 读取数据失败 ({}): {}", peer_id, e);
+                        loop {
+                            tokio::select! {
+                                Some(data) = stdin_rx.recv() => {
+                                    stream.write_all(&data).await.unwrap();
+                                }
+                                result = stream.read(read_buf) => {
+                                    match result {
+                                        Ok(0) => {
+                                            println!("🔌 连接关闭: {}", peer_id);
+                                        }
+                                        Ok(n) => {
+                                            let received_data = &read_buf[..n];
+                                            stdout_tx.send(Bytes::from(received_data.to_vec())).await.unwrap();
+                                        }
+                                        Err(e) => {
+                                            println!("❌ 读取数据失败 ({}): {}", peer_id, e);
+                                        }
                                     }
                                 }
                             }
