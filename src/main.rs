@@ -119,7 +119,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
             }
             Some(data) = stdin_rx.recv() => {
                 let input = String::from_utf8_lossy(&data).to_string();
-                match input.as_str() {
+                let input = input.trim();
+                match input {
                     "list" | "peers" => {
                         peer_manager.list_peers().await;
                         continue;
