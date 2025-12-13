@@ -69,14 +69,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 }
                 Some((peer_id, stream)) = incoming.next() => {
                     let stdout_tx = stdout_tx.clone();
-                    let (stdin_tx, mut stdin_rx) = tokio::sync::mpsc::channel::<Bytes>(100);
+                    let (stdin_tx, mut stream_stdin_rx) = tokio::sync::mpsc::channel::<Bytes>(100);
                     stdin_txs_clone.lock().await.push(stdin_tx);
                     tasks.push(tokio::spawn(async move {
                         let mut stream = stream;
                         let read_buf = &mut [0u8; 1024];
                         loop {
                             tokio::select! {
-                                Some(data) = stdin_rx.recv() => {
+                                Some(data) = stream_stdin_rx.recv() => {
                                     stream.write_all(&data).await.unwrap();
                                 }
                                 result = stream.read(read_buf) => {
@@ -105,8 +105,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
     tokio::spawn(async move {
         handle_stdin(swarm_tx, &mut swarm_rx).await;
     });
-    let (stdin_tx, mut stdin_rx) = tokio::sync::mpsc::channel::<Bytes>(100);
-    stdin_txs.lock().await.push(stdin_tx);
+    let (swarm_loop_tx, mut swarm_loop_stdin_rx) = tokio::sync::mpsc::channel::<Bytes>(1);
+    stdin_txs.lock().await.push(swarm_loop_tx);
     loop {
         tokio::select! {
             // control+c to exit
@@ -117,7 +117,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
             event = swarm.select_next_some() => {
                 handle_swarm_event(event, &peer_manager, &mut swarm).await;
             }
-            Some(data) = stdin_rx.recv() => {
+            Some(data) = swarm_loop_stdin_rx.recv() => {
                 let input = String::from_utf8_lossy(&data).to_string();
                 let input = input.trim();
                 match input {
