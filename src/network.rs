@@ -1,6 +1,8 @@
-use std::error::Error;
+use std::{error::Error, sync::Arc};
 
+use futures::stream::FuturesUnordered;
 use libp2p::{Swarm, SwarmBuilder, identity, kad::{self, store::MemoryStore}};
+use tokio::sync::RwLock;
 use crate::behaviour::StrandsBehaviour;
 
 pub fn create_swarm(keypair: identity::Keypair) -> Result<Swarm<StrandsBehaviour>, Box<dyn Error>> {
@@ -32,3 +34,7 @@ pub fn create_swarm(keypair: identity::Keypair) -> Result<Swarm<StrandsBehaviour
 
     Ok(swarm)
 }
+
+
+
+pub type RecvTask = FuturesUnordered<tokio::task::JoinHandle<Vec<u8>>>;

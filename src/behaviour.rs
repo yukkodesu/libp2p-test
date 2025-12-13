@@ -1,14 +1,10 @@
-use std::sync::Arc;
-
-use futures::StreamExt;
 use libp2p::{
-    StreamProtocol, gossipsub,
+    gossipsub,
     kad::store::MemoryStore,
     mdns,
     swarm::{NetworkBehaviour, SwarmEvent},
 };
-use libp2p_stream::{Behaviour as Stream, Control};
-use tokio::sync::RwLock;
+use libp2p_stream::{Behaviour as Stream};
 
 #[derive(NetworkBehaviour)]
 pub struct StrandsBehaviour {

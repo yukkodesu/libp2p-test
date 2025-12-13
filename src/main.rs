@@ -2,15 +2,12 @@ mod behaviour;
 mod network;
 mod peer_manager;
 
-use std::{error::Error, sync::Arc};
+use std::error::Error;
 
-use futures::{AsyncReadExt, AsyncWriteExt, FutureExt, StreamExt};
-use libp2p::{Multiaddr, StreamProtocol, identity, swarm};
-use tokio::{
-    io::{AsyncBufReadExt, AsyncWriteExt as TokioAsyncWriteExt},
-    pin,
-    sync::RwLock,
-};
+use bytes::Bytes;
+use futures::{AsyncReadExt, AsyncWriteExt, StreamExt, stream::FuturesUnordered};
+use libp2p::{Multiaddr, StreamProtocol, identity};
+use tokio::io::{AsyncBufReadExt, AsyncWriteExt as TokioAsyncWriteExt};
 use tracing_subscriber::EnvFilter;
 
 use crate::{behaviour::handle_swarm_event, network::create_swarm};
@@ -38,8 +35,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     let mut buf_reader = tokio::io::BufReader::new(tokio::io::stdin());
     let mut buf_writer = tokio::io::BufWriter::new(tokio::io::stdout());
-    let mut line = String::new();
-    let mut control = swarm.behaviour().stream.new_control();
+    let control = swarm.behaviour().stream.new_control();
+
+    // channel for sending data to connected peers
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<Bytes>();
 
     let peer_manager_clone = peer_manager.clone();
     let mut control_clone = control.clone();
@@ -48,19 +47,68 @@ async fn main() -> Result<(), Box<dyn Error>> {
             .accept(StreamProtocol::new("/stream/1.0.0"))
             .unwrap();
         loop {
+            let mut tasks: FuturesUnordered<tokio::task::JoinHandle<Option<Vec<u8>>>> =
+                FuturesUnordered::new();
             tokio::select! {
-                // handle all recv_task futureUnordered in peer_manager
-                // Some(_) = peer_manager_clone.recv_task.write().await.next() => {
-
-                // }
+                // handle all recv_tasks futureUnordered in peer_manager
+                Some(data) = tasks.next() => {
+                    let data = data.expect("Task panicked");
+                    if let Some(buf) = data {
+                        buf_writer.write_all(&buf).await.unwrap();
+                    }
+                }
+                Some(data) = rx.recv() => {
+                    for peer_id in peer_manager_clone.connected_peer().await {
+                        let stream = peer_manager_clone.get_or_insert_stream(peer_id, || async {
+                            control_clone
+                                .open_stream(peer_id, StreamProtocol::new("/stream/1.0.0"))
+                                .await
+                                .unwrap()
+                        }).await;
+                        let mut stream = stream.lock().await;
+                        if let Err(e) = stream.write_all(&data).await {
+                            eprintln!("❌ 发送消息到 {} 失败: {}", peer_id, e);
+                            continue;
+                        }
+                        println!("➡️  发送消息到 {}: {}", peer_id, String::from_utf8_lossy(&data));
+                    }
+                }
                 Some((peer_id, stream)) = incoming.next() => {
-                    println!("✅ 接受来自节点 {} 的连接", peer_id);
+                    peer_manager_clone.add_stream(peer_id, stream).await;
+                    let peer_manager_clone = peer_manager_clone.clone();
+                    let mut control_clone = control_clone.clone();
+                    tasks.push(tokio::spawn(async move {
+                        let stream = peer_manager_clone.get_or_insert_stream(peer_id, || async {
+                            control_clone
+                                .open_stream(peer_id, StreamProtocol::new("/stream/1.0.0"))
+                                .await
+                                .unwrap()
+                        }).await;
+                        let mut stream = stream.lock().await;
+                        let mut buf = vec![0u8; 1024];
+                        match stream.read(&mut buf).await {
+                            Ok(0) => {
+                                println!("❌ 连接已关闭: {}", peer_id);
+                                peer_manager_clone.remove_stream(&peer_id).await;
+                                None
+                            }
+                            Ok(_) => {
+                                Some(buf)
+                            }
+                            Err(e) => {
+                                eprintln!("❌ 从 {} 读取数据失败: {}", peer_id, e);
+                                peer_manager_clone.remove_stream(&peer_id).await;
+                                None
+                            }
+                        }
+                    }));
                 }
             }
         }
     });
 
     loop {
+        let mut line = String::new();
         tokio::select! {
             // control+c to exit
             _ = tokio::signal::ctrl_c() => {
@@ -77,8 +125,8 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 }
 
                 // 处理命令
-                let input = line.trim();
-                match input {
+                let input = line.trim().to_string();
+                match input.as_str() {
                     "list" | "peers" => {
                         peer_manager.list_peers().await;
                         line.clear();
@@ -120,25 +168,10 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 }
 
                 // 发送消息给连接的节点
-                let input = line.as_bytes();
+                // let input = line.as_bytes();
                 // send to connected peers
-                let peers: Vec<_> = swarm.connected_peers().copied().collect();
-                for peer_id in peers {
-                    let stream = control
-                            .open_stream(peer_id, StreamProtocol::new("/stream/1.0.0"))
-                            .await
-                            .unwrap();
-                    let (tx, rx) = stream.split();
-                    // let stream = peer_manager.get_or_insert_stream(peer_id, || async {
-
-                    // }).await;
-                    let mut stream = stream.write().await;
-                    if let Err(e) = stream.write_all(input).await {
-                        eprintln!("❌ 发送消息到 {} 失败: {}", peer_id, e);
-                        continue;
-                    }
-                    println!("➡️  发送消息到 {}: {}", peer_id, String::from_utf8_lossy(input));
-                }
+                let bytes = Bytes::from(input.into_bytes());
+                tx.send(bytes).unwrap();
                 line.clear();
             }
         }

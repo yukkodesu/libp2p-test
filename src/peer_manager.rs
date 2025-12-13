@@ -1,11 +1,10 @@
-use futures::{StreamExt, stream::FuturesUnordered};
 use std::collections::HashMap;
 use std::sync::Arc;
 use tokio::sync::{Mutex, RwLock};
 
-use libp2p::Stream;
+use libp2p::{Stream, multiaddr::Iter};
 
-pub type SharedStream = Arc<RwLock<Stream>>;
+pub type SharedStream = Arc<Mutex<Stream>>;
 
 pub struct PeerManager {
     peers: RwLock<HashMap<libp2p::PeerId, Vec<libp2p::Multiaddr>>>,
@@ -19,7 +18,6 @@ impl PeerManager {
         Self {
             peers: RwLock::new(HashMap::new()),
             streams: RwLock::new(HashMap::new()),
-            recv_task: RwLock::new(FuturesUnordered::new()),
         }
     }
 
@@ -64,9 +62,13 @@ impl PeerManager {
         println!("{:-<80}", "");
     }
 
+    pub async fn connected_peer(&self) -> Vec<libp2p::PeerId> {
+        self.streams.read().await.keys().copied().collect()
+    }
+
     pub async fn add_stream(&self, peer_id: libp2p::PeerId, stream: Stream) {
         let mut streams = self.streams.write().await;
-        streams.insert(peer_id, Arc::new(RwLock::new(stream)));
+        streams.insert(peer_id, Arc::new(Mutex::new(stream)));
     }
 
     pub async fn get_stream(&self, peer_id: &libp2p::PeerId) -> Option<SharedStream> {
@@ -98,7 +100,7 @@ impl PeerManager {
         }
 
         let stream = f().await;
-        let shared_stream = Arc::new(RwLock::new(stream));
+        let shared_stream = Arc::new(Mutex::new(stream));
         streams.insert(peer_id, shared_stream.clone());
         shared_stream
     }
@@ -116,8 +118,4 @@ impl PeerManager {
         streams.len()
     }
 
-    pub async fn add_recv_task(&self, handle: tokio::task::JoinHandle<Vec<u8>>) {
-        let tasks = self.recv_task.write().await;
-        tasks.push(handle);
-    }
 }
