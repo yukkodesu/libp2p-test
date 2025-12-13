@@ -9,7 +9,7 @@ use std::{
 };
 
 use bytes::Bytes;
-use futures::{AsyncReadExt, AsyncWriteExt, StreamExt, stream::FuturesUnordered};
+use futures::{AsyncReadExt, AsyncWriteExt, StreamExt, stream::FuturesUnordered, task};
 use libp2p::{Multiaddr, StreamProtocol, identity};
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt as TokioAsyncWriteExt},
@@ -19,7 +19,7 @@ use tracing_subscriber::EnvFilter;
 
 use crate::{
     behaviour::handle_swarm_event,
-    network::{create_swarm, handle_stdin},
+    network::{create_swarm, handle_stdin, handle_stream},
 };
 
 #[tokio::main]
@@ -44,12 +44,13 @@ async fn main() -> Result<(), Box<dyn Error>> {
     swarm.listen_on(listen_addr.parse()?)?;
 
     let (stdout_tx, mut swarm_rx) = tokio::sync::mpsc::channel::<Bytes>(100);
-    let (swarm_tx, mut stdin_rx) = tokio::sync::mpsc::channel::<Bytes>(100);
+    let (stream_tx, mut stdin_rx) = tokio::sync::mpsc::channel::<Bytes>(100);
     let stdin_txs = Arc::new(Mutex::new(Vec::<tokio::sync::mpsc::Sender<Bytes>>::new()));
-
+    stdin_txs.lock().await.push(stream_tx);
     let control = swarm.behaviour().stream.new_control();
     let mut control_clone = control.clone();
     let stdin_txs_clone = stdin_txs.clone();
+    let peer_manager_clone = peer_manager.clone();
     tokio::spawn(async move {
         let mut incoming = control_clone
             .accept(StreamProtocol::new("/stream/1.0.0"))
@@ -60,50 +61,30 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 // handle all recv_tasks futureUnordered in peer_manager
                 Some(_) = tasks.next() => {}
                 Some(data) = stdin_rx.recv() => {
-                    let txs = stdin_txs_clone.try_lock().unwrap();
-                    for tx in txs.iter() {
-                        if let Err(e) = tx.send(data.clone()).await {
-                            println!("❌ 发送数据到节点失败: {}", e);
+                    for peer_id in peer_manager_clone.peer_iter().await {
+                        let stdout_tx = stdout_tx.clone();
+                        let (stdin_tx, stream_stdin_rx) = tokio::sync::mpsc::channel::<Bytes>(100);
+                        stdin_tx.send(data.clone()).await.unwrap();
+                        stdin_txs_clone.lock().await.push(stdin_tx);
+                        if let Ok(stream) = control_clone.open_stream(peer_id, StreamProtocol::new("/stream/1.0.0")).await {
+                            tasks.push(handle_stream(stream, stream_stdin_rx, stdout_tx.clone(), peer_id));
                         }
                     }
+
                 }
                 Some((peer_id, stream)) = incoming.next() => {
                     let stdout_tx = stdout_tx.clone();
-                    let (stdin_tx, mut stream_stdin_rx) = tokio::sync::mpsc::channel::<Bytes>(100);
+                    let (stdin_tx, stream_stdin_rx) = tokio::sync::mpsc::channel::<Bytes>(100);
                     stdin_txs_clone.lock().await.push(stdin_tx);
-                    tasks.push(tokio::spawn(async move {
-                        let mut stream = stream;
-                        let read_buf = &mut [0u8; 1024];
-                        loop {
-                            tokio::select! {
-                                Some(data) = stream_stdin_rx.recv() => {
-                                    stream.write_all(&data).await.unwrap();
-                                }
-                                result = stream.read(read_buf) => {
-                                    match result {
-                                        Ok(0) => {
-                                            println!("🔌 连接关闭: {}", peer_id);
-                                            break;
-                                        }
-                                        Ok(n) => {
-                                            let received_data = &read_buf[..n];
-                                            stdout_tx.send(Bytes::from(received_data.to_vec())).await.unwrap();
-                                        }
-                                        Err(e) => {
-                                            println!("❌ 读取数据失败 ({}): {}", peer_id, e);
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }));
+                    tasks.push(handle_stream(stream, stream_stdin_rx, stdout_tx, peer_id));
                 }
             }
         }
     });
 
+    let stdin_txs_clone = stdin_txs.clone();
     tokio::spawn(async move {
-        handle_stdin(swarm_tx, &mut swarm_rx).await;
+        handle_stdin(stdin_txs_clone, &mut swarm_rx).await;
     });
     let (swarm_loop_tx, mut swarm_loop_stdin_rx) = tokio::sync::mpsc::channel::<Bytes>(1);
     stdin_txs.lock().await.push(swarm_loop_tx);
