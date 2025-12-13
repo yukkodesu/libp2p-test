@@ -1,55 +1,59 @@
 use std::collections::HashMap;
 use std::sync::Arc;
-use tokio::sync::RwLock;
+use tokio::sync::{Mutex, RwLock};
 
 use libp2p::Stream;
 
+/// 包装的 Stream，允许独立的并发访问
+pub type SharedStream = Arc<Mutex<Stream>>;
 
 pub struct PeerManager {
-    peers: HashMap<libp2p::PeerId, Vec<libp2p::Multiaddr>>,
-    streams: HashMap<libp2p::PeerId, Stream>,
+    peers: RwLock<HashMap<libp2p::PeerId, Vec<libp2p::Multiaddr>>>,
+    streams: RwLock<HashMap<libp2p::PeerId, SharedStream>>,
 }
 
-pub type SharedPeerManager = Arc<RwLock<PeerManager>>;
+pub type SharedPeerManager = Arc<PeerManager>;
 
 impl PeerManager {
     pub fn new() -> Self {
         Self {
-            peers: HashMap::new(),
-            streams: HashMap::new(),
+            peers: RwLock::new(HashMap::new()),
+            streams: RwLock::new(HashMap::new()),
         }
     }
 
     pub fn new_shared() -> SharedPeerManager {
-        Arc::new(RwLock::new(Self::new()))
+        Arc::new(Self::new())
     }
 
-    /// 添加或更新节点地址
-    pub fn add_peer(&mut self, peer_id: libp2p::PeerId, addr: libp2p::Multiaddr) {
-        self.peers.entry(peer_id)
-            .or_default()
-            .push(addr);
-        println!("✅ 发现并添加节点: {} (地址: {})", peer_id, self.peers.get(&peer_id).unwrap().last().unwrap());
+    pub async fn add_peer(&self, peer_id: libp2p::PeerId, addr: libp2p::Multiaddr) {
+        let mut peers = self.peers.write().await;
+        let addrs = peers.entry(peer_id).or_default();
+        addrs.push(addr.clone());
+        println!("✅ 发现并添加节点: {} (地址: {})", peer_id, addr);
     }
 
-    /// 移除节点
-    pub fn remove_peer(&mut self, peer_id: &libp2p::PeerId) {
-        if self.peers.remove(peer_id).is_some() {
+    pub async fn remove_peer(&self, peer_id: &libp2p::PeerId) {
+        let mut peers = self.peers.write().await;
+        if peers.remove(peer_id).is_some() {
             println!("🗑️  移除节点: {}", peer_id);
         }
     }
-    pub fn get_peer_addrs(&self, peer_id: &libp2p::PeerId) -> Option<&Vec<libp2p::Multiaddr>> {
-        self.peers.get(peer_id)
+
+    pub async fn get_peer_addrs(&self, peer_id: &libp2p::PeerId) -> Option<Vec<libp2p::Multiaddr>> {
+        let peers = self.peers.read().await;
+        peers.get(peer_id).cloned()
     }
 
-    pub fn list_peers(&self) {
-        if self.peers.is_empty() {
+    pub async fn list_peers(&self) {
+        let peers = self.peers.read().await;
+        if peers.is_empty() {
             println!("📭 暂无发现的节点");
             return;
         }
-        println!("\n📋 已发现的节点列表 (共 {} 个):", self.peers.len());
+        println!("\n📋 已发现的节点列表 (共 {} 个):", peers.len());
         println!("{:-<80}", "");
-        for (peer_id, addrs) in &self.peers {
+        for (peer_id, addrs) in peers.iter() {
             println!("🔹 节点ID: {}", peer_id);
             for addr in addrs {
                 println!("   地址: {}", addr);
@@ -59,32 +63,55 @@ impl PeerManager {
         println!("{:-<80}", "");
     }
 
-    pub fn add_stream(&mut self, peer_id: libp2p::PeerId, stream: Stream) {
-        self.streams.insert(peer_id, stream);
+    pub async fn add_stream(&self, peer_id: libp2p::PeerId, stream: Stream) {
+        let mut streams = self.streams.write().await;
+        streams.insert(peer_id, Arc::new(Mutex::new(stream)));
     }
-    pub fn get_stream(&mut self, peer_id: &libp2p::PeerId) -> Option<&mut Stream> {
-        self.streams.get_mut(peer_id)
+
+    pub async fn get_stream(&self, peer_id: &libp2p::PeerId) -> Option<SharedStream> {
+        let streams = self.streams.read().await;
+        streams.get(peer_id).cloned()
     }
-    pub fn remove_stream(&mut self, peer_id: &libp2p::PeerId) {
-        self.streams.remove(peer_id);
+
+    pub async fn remove_stream(&self, peer_id: &libp2p::PeerId) {
+        let mut streams = self.streams.write().await;
+        streams.remove(peer_id);
     }
-    pub async fn get_or_insert_stream<F, Fut>(&mut self, peer_id: libp2p::PeerId, f: F) -> &mut Stream
+
+    pub async fn get_or_insert_stream<F, Fut>(&self, peer_id: libp2p::PeerId, f: F) -> SharedStream
     where
         F: FnOnce() -> Fut,
         Fut: std::future::Future<Output = Stream>,
     {
-        if let std::collections::hash_map::Entry::Vacant(e) = self.streams.entry(peer_id) {
-            let stream = f().await;
-            e.insert(stream);
+        {
+            let streams = self.streams.read().await;
+            if let Some(stream) = streams.get(&peer_id) {
+                return stream.clone();
+            }
         }
-        self.streams.get_mut(&peer_id).unwrap()
+
+        let mut streams = self.streams.write().await;
+        // 再次检查，避免竞态条件
+        if let Some(stream) = streams.get(&peer_id) {
+            return stream.clone();
+        }
+
+        let stream = f().await;
+        let shared_stream = Arc::new(Mutex::new(stream));
+        streams.insert(peer_id, shared_stream.clone());
+        shared_stream
     }
 
-    pub fn stream_iter(&mut self) -> impl Iterator<Item = (&libp2p::PeerId, &mut Stream)> {
-        self.streams.iter_mut()
+    pub async fn get_all_streams(&self) -> Vec<(libp2p::PeerId, SharedStream)> {
+        let streams = self.streams.read().await;
+        streams
+            .iter()
+            .map(|(id, stream)| (*id, stream.clone()))
+            .collect()
     }
 
-    pub fn stream_count(&self) -> usize {
-        self.streams.len()
+    pub async fn stream_count(&self) -> usize {
+        let streams = self.streams.read().await;
+        streams.len()
     }
 }
