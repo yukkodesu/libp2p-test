@@ -43,16 +43,14 @@ async fn main() -> Result<(), Box<dyn Error>> {
         let mut incoming = control_clone
             .accept(StreamProtocol::new("/stream/1.0.0"))
             .unwrap();
+        let mut tasks: FuturesUnordered<tokio::task::JoinHandle<Option<Vec<u8>>>> =
+            FuturesUnordered::new();
         loop {
-            let mut tasks: FuturesUnordered<tokio::task::JoinHandle<Option<Vec<u8>>>> =
-                FuturesUnordered::new();
             tokio::select! {
                 // handle all recv_tasks futureUnordered in peer_manager
                 Some(data) = tasks.next() => {
-                    let data = data.expect("Task panicked");
-                    if let Some(buf) = data {
-                        buf_writer.write_all(&buf).await.unwrap();
-                    }
+                    // 任务完成，可能是连接关闭或出错
+                    let _ = data.expect("Task panicked");
                 }
                 Some((peer_id, stream)) = incoming.next() => {
                     peer_manager_clone.add_stream(peer_id, stream).await;
@@ -67,21 +65,29 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         }).await;
                         let mut stream = stream.lock().await;
                         let mut buf = vec![0u8; 1024];
-                        match stream.read(&mut buf).await {
-                            Ok(0) => {
-                                println!("❌ 连接已关闭: {}", peer_id);
-                                peer_manager_clone.remove_stream(&peer_id).await;
-                                None
-                            }
-                            Ok(_) => {
-                                Some(buf)
-                            }
-                            Err(e) => {
-                                eprintln!("❌ 从 {} 读取数据失败: {}", peer_id, e);
-                                peer_manager_clone.remove_stream(&peer_id).await;
-                                None
+                        // 持续循环读取，而不是只读取一次
+                        loop {
+                            match stream.read(&mut buf).await {
+                                Ok(0) => {
+                                    println!("❌ 连接已关闭: {}", peer_id);
+                                    peer_manager_clone.remove_stream(&peer_id).await;
+                                    break;
+                                }
+                                Ok(n) => {
+                                    // 打印接收到的消息
+                                    if let Ok(msg) = String::from_utf8(buf[..n].to_vec()) {
+                                        println!("📩 收到来自 {} 的消息: {}", peer_id, msg.trim());
+                                    }
+                                    // 继续读取下一条消息
+                                }
+                                Err(e) => {
+                                    eprintln!("❌ 从 {} 读取数据失败: {}", peer_id, e);
+                                    peer_manager_clone.remove_stream(&peer_id).await;
+                                    break;
+                                }
                             }
                         }
+                        None
                     }));
                 }
             }
@@ -163,6 +169,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         eprintln!("❌ 发送消息到 {} 失败: {}", peer_id, e);
                         continue;
                     }
+                    println!("✅ 已发送消息到 {}", peer_id);
                 }
                 line.clear();
             }
