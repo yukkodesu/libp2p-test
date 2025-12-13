@@ -4,14 +4,16 @@ mod peer_manager;
 
 use std::{error::Error, sync::Arc};
 
-use futures::{AsyncReadExt, AsyncWriteExt};
+use futures::{AsyncReadExt, AsyncWriteExt, FutureExt, StreamExt};
 use libp2p::{Multiaddr, StreamProtocol, identity, swarm};
 use tokio::{
-    io::{AsyncBufReadExt, AsyncWriteExt as TokioAsyncWriteExt}, pin, sync::RwLock
+    io::{AsyncBufReadExt, AsyncWriteExt as TokioAsyncWriteExt},
+    pin,
+    sync::RwLock,
 };
 use tracing_subscriber::EnvFilter;
 
-use crate::{behaviour::handle_behaviour_event, network::create_swarm};
+use crate::{behaviour::handle_swarm_event, network::create_swarm};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn Error>> {
@@ -21,7 +23,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
 
     let identity = identity::Keypair::generate_ed25519();
 
-    let swarm = Arc::new(RwLock::new(create_swarm(identity)?));
+    let mut swarm = create_swarm(identity)?;
     let peer_manager = peer_manager::PeerManager::new_shared();
     // parse listen address from command line or use default
     // --port <port>
@@ -32,48 +34,42 @@ async fn main() -> Result<(), Box<dyn Error>> {
     }
     let port = args[2].parse::<u16>()?;
     let listen_addr = format!("/ip4/0.0.0.0/udp/{}/quic-v1", port);
-    swarm.write().await.listen_on(listen_addr.parse()?)?;
+    swarm.listen_on(listen_addr.parse()?)?;
 
     let mut buf_reader = tokio::io::BufReader::new(tokio::io::stdin());
     let mut buf_writer = tokio::io::BufWriter::new(tokio::io::stdout());
     let mut line = String::new();
-    let mut control = swarm.write().await.behaviour().stream.new_control();
+    let mut control = swarm.behaviour().stream.new_control();
 
     let peer_manager_clone = peer_manager.clone();
-    let swarm_clone = swarm.clone();
-    let control_clone = control.clone();
+    let mut control_clone = control.clone();
     tokio::spawn(async move {
-        handle_behaviour_event(&peer_manager_clone, swarm_clone, control_clone).await;
+        let mut incoming = control_clone
+            .accept(StreamProtocol::new("/stream/1.0.0"))
+            .unwrap();
+        loop {
+            tokio::select! {
+                // handle all recv_task futureUnordered in peer_manager
+                // Some(_) = peer_manager_clone.recv_task.write().await.next() => {
+
+                // }
+                Some((peer_id, stream)) = incoming.next() => {
+                    println!("✅ 接受来自节点 {} 的连接", peer_id);
+                }
+            }
+        }
     });
 
     loop {
-        if (tokio::signal::ctrl_c().await).is_ok() {
-            println!("Ctrl-C received, shutting down.");
-            break;
-        }
         tokio::select! {
-            _ = async {
-                let mut to_remove = Vec::new();
-                let streams = peer_manager.get_all_streams().await;
-                for (peer_id, stream) in streams {
-                    let mut buf = vec![0u8; 4096];
-                    let mut stream = stream.lock().await;
-                    match stream.read(&mut buf).await {
-                        Ok(n) if n > 0 => {
-                            let _ = buf_writer.write_all(&buf[..n]).await;
-                        }
-                        Ok(_) => {}
-                        Err(e) => {
-                            eprintln!("❌ 读取节点 {} 的流时出错: {}", peer_id, e);
-                            to_remove.push(peer_id);
-                        }
-                    }
-                }
-
-                for peer_id in to_remove {
-                    peer_manager.remove_stream(&peer_id).await;
-                }
-            } => {}
+            // control+c to exit
+            _ = tokio::signal::ctrl_c() => {
+                println!("Received Ctrl+C, shutting down.");
+                break;
+            }
+            event = swarm.select_next_some() => {
+                handle_swarm_event(event, &peer_manager, &mut swarm).await;
+            }
             result = buf_reader.read_line(&mut line) => {
                 let n = result?;
                 if n == 0 {
@@ -89,7 +85,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         continue;
                     }
                     "connected" => {
-                        let peers: Vec<_> = swarm.read().await.connected_peers().copied().collect();
+                        let peers: Vec<_> = swarm.connected_peers().copied().collect();
                         if peers.is_empty() {
                             println!("📭 当前没有连接的节点");
                         } else {
@@ -117,7 +113,7 @@ async fn main() -> Result<(), Box<dyn Error>> {
                         line.clear();
                         continue;
                     }
-                    swarm.write().await.dial(parts[1].parse::<Multiaddr>()?)?;
+                    swarm.dial(parts[1].parse::<Multiaddr>()?)?;
                     println!("正在连接到 {}", parts[1]);
                     line.clear();
                     continue;
@@ -126,15 +122,17 @@ async fn main() -> Result<(), Box<dyn Error>> {
                 // 发送消息给连接的节点
                 let input = line.as_bytes();
                 // send to connected peers
-                let peers: Vec<_> = swarm.read().await.connected_peers().copied().collect();
+                let peers: Vec<_> = swarm.connected_peers().copied().collect();
                 for peer_id in peers {
-                    let stream = peer_manager.get_or_insert_stream(peer_id, || async {
-                        control
+                    let stream = control
                             .open_stream(peer_id, StreamProtocol::new("/stream/1.0.0"))
                             .await
-                            .unwrap()
-                    }).await;
-                    let mut stream = stream.lock().await;
+                            .unwrap();
+                    let (tx, rx) = stream.split();
+                    // let stream = peer_manager.get_or_insert_stream(peer_id, || async {
+
+                    // }).await;
+                    let mut stream = stream.write().await;
                     if let Err(e) = stream.write_all(input).await {
                         eprintln!("❌ 发送消息到 {} 失败: {}", peer_id, e);
                         continue;
